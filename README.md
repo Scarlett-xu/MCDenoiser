@@ -10,6 +10,12 @@ Our network framework is shown as follows.
 
 <img src="images\network_details.png" alt="dog" />
 
+### Environment Setup
+#### Prerequisites
+- Python 3.8
+- Create Environment from environment.yml
+
+
 ### Evaluation
 
 Our model show good performance on Volumatic data, especially in translucent material.
