@@ -7,7 +7,6 @@ from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 from datasets import *
 from tools.utils import AverageMeter
-from volumn_data import prepare
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
 
@@ -67,7 +66,7 @@ if not os.path.exists(results_save_path):
 
 
 
-def denoise(add_bg = True,save_exr = True):
+def denoise(add_bg = False,save_exr = True):
 
 
 
@@ -121,21 +120,20 @@ def denoise(add_bg = True,save_exr = True):
             # hook_handle2.remove()
             # features = features.cpu().numpy()
             noisy_r =  features[:,6:9,:,:].numpy()
-            alpha = features[:, 9:, :, :].numpy()
+            alpha = features[:, 9:10, :, :].numpy()
             alpha = np.concatenate((alpha, alpha, alpha), axis=1)
             output = output.cpu().numpy()
             target = target.numpy()
 
             for i in range(output.shape[0]):
-                outputfile = results_save_path+"denoised{}.png".format(col)
-                noisyfile = results_save_path+"noisy{}.png".format(col)
-                reffile = results_save_path+"ref{}.png".format(col)
+                print(output.shape)
+                outputfile = results_save_path+"/denoised{}.png".format(col)
+                noisyfile = results_save_path+"/noisy{}.png".format(col)
+                reffile = results_save_path+"/ref{}.png".format(col)
                 if add_bg == True:
                     bgpath = config['bgpath']
                     bg = cv2.imread(bgpath)
                     bg = resize_image(bg,output[i].shape[1:])
-                    # if save_exr == True:
-                    #     save_exr_file(output[i],alpha[i],results_save_path+"denoised{}.exr".format(col))
                     writeimage_with_bg(output[i],bg,alpha[i],outputfile,if_sharp=False)
                     writeimage_with_bg(noisy_r[i],bg,alpha[i],noisyfile)
                     writeimage_with_bg(target[i],bg,alpha[i],reffile)
@@ -191,6 +189,6 @@ def create_video_from_images(image_folder, output_video='output_video.mp4', fps=
 
 
 if __name__ == '__main__':
-    denoise(add_bg = True)
+    denoise(add_bg = False)
     # result_saved_path = results_save_path + "\\denoised\\b\\"
     # create_video_from_images('E:\\DataSets\\results\\3-dog-8spp\\red-sharp\\')

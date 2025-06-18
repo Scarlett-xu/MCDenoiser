@@ -6,7 +6,7 @@ We introduces a novel **real-time** neural denoising technique based on **noisy 
 
 Our network framework is shown as follows.
 
-<img src="images\network.jpg" alt="dog" />
+<img src="images\network.png" alt="dog" />
 
 <img src="images\network_details.png" alt="dog" />
 
@@ -20,7 +20,7 @@ Our network framework is shown as follows.
 
 Our model show good performance on Volumatic data, especially in translucent material.
 
-<img src="images\dog.png" alt="dog" style="zoom:50%;" />
+<img src="images\comparision.png" alt="dog" style="zoom:50%;" />
 
 ### Train and test
 

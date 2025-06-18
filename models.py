@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-
+from thop import profile
+from thop import clever_format
 __all__ = ['Single_Model']
 device = torch.device("cuda:0")
 
@@ -56,6 +57,52 @@ class Ea_block(nn.Module):
 
         out = self.se(out)
         return out
+
+
+class Weight_Learning_Layer(nn.Module):
+    def __init__(self):
+        super(Weight_Learning_Layer, self).__init__()
+
+        # 第一层卷积：输入6通道，输出6通道
+        self.conv1 = nn.Conv2d(6, 6, kernel_size=3, padding=1)
+        # 第二层卷积：输入6通道，输出3通道
+        self.conv2 = nn.Conv2d(6, 3, kernel_size=3, padding=1)
+        # 激活函数
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, image1, image2):
+        # 检查输入是否为3通道图像
+        assert image1.shape[1] == 3 and image2.shape[1] == 3, "输入图像必须是3通道"
+        assert image1.shape == image2.shape, "两个输入图像的尺寸必须相同"
+
+        # 拼接两个输入图像（按通道维度）
+        inputs = torch.cat([image1, image2], dim=1)  # 形状变为 (B, 6, H, W)
+
+        # 第一层卷积 + 激活
+        x = F.relu(self.conv1(inputs))  # 形状仍为 (B, 6, H, W)
+        # 第二层卷积
+        x = self.conv2(x)  # 形状为 (B, 3, H, W)
+        # 使用 Sigmoid 激活函数将值限制到 [0, 1]
+        output = self.sigmoid(x)
+
+        return output
+
+
+class temp_network(nn.Module):
+    def __init__(self):
+        super(temp_network, self).__init__()
+
+        self.spatio_predict = Single_Model()
+        self.weight_learning_layer = Weight_Learning_Layer()
+
+    def forward(self,x, pre_x):
+        # x包括：sdf, illu, position
+        spatio_results = self.spatio_predict(x[:, 0:3],x[:, 3:6])
+        temp_weights = self.weight_learning_layer(pre_x[:, 0:3],spatio_results)
+        output = spatio_results*temp_weights + pre_x[:, 0:3]*(1-temp_weights)
+        return output, spatio_results
+
+
 
 class Eb_block(nn.Module):
     def __init__(self, in_channels, out_channels, se_reduction_ratio=16,leaky_relu_slope=0.1):

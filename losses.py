@@ -5,7 +5,7 @@ import numpy as np
 import torch.nn.functional as F
 from torch.autograd import Variable
 from math import exp
-__all__ = ['SMAPELoss','l1loss','SMAPELosstemp']
+__all__ = ['RAEloss_kd','l1loss','SMAPELosstemp']
 
 def LoG(img):
     weight = [
@@ -418,5 +418,6 @@ class CombinedLoss(nn.Module):
 
         # 计算总损失
         total_loss = self.grad_weight * grad_loss + self.mse_weight * mse_loss
-
+        # print("grad_loss:{}".format(grad_loss))
+        # print("mse_loss:{}".format(mse_loss))
         return total_loss

@@ -5,7 +5,7 @@ import losses
 import torch.backends.cudnn as cudnn
 import models as models
 import torch.optim as optim
-from tools.prepare_data import *
+from prepare_data import *
 from datasets import DataSetTrain,DataSetVal
 import torch
 from collections import OrderedDict
@@ -13,14 +13,11 @@ from tools.utils import AverageMeter
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
-import time
 from skimage.metrics import structural_similarity
 from skimage.metrics import peak_signal_noise_ratio
-import cv2
-from volumn_data import prepare
+
 LOSS_NAMES = losses.__all__
 MODEL_NAMES = models.__all__
-from apex import amp
 
 eps = 0.00316
 def BMFRGammaCorrection(img):
@@ -39,8 +36,8 @@ def ComputeMetrics(truth_img, test_img):
 
 
 
-# 没用kd
-def train(train_loader, network, criterion, optimizer):
+# 只用student作为训练
+def train_student_only(train_loader, network, criterion, optimizer):
     avg_meters = {'loss': AverageMeter()}
     network.train()
 
@@ -51,7 +48,7 @@ def train(train_loader, network, criterion, optimizer):
         sdf = features[:, 0:3, :, :]
         illu = features[:, 3:6, :, :]
 
-        target = target.cuda()
+        target = target[:, 0:3, :, :].cuda()
         sdf = sdf.cuda()
         illu = illu.cuda()
 
@@ -81,7 +78,49 @@ def train(train_loader, network, criterion, optimizer):
 
     return OrderedDict([('loss', avg_meters['loss'].avg),])
 
+# 用上教师模型蒸馏
+def train_distillation(train_loader,student_net,teacher_net, criterion, optimizer):
+    avg_meters = {'loss': AverageMeter()}
+    student_net.train()
 
+    pbar = tqdm(total=len(train_loader))
+    for (features, target) in train_loader:
+
+        sdf = features[:, 0:3, :, :]
+        illu = features[:, 3:6, :, :]
+
+        target = target[:, 0:3, :, :].cuda()
+        sdf = sdf.cuda()
+        illu = illu.cuda()
+
+        # compute output
+        optimizer.zero_grad()
+        student_outputs = student_net(sdf,illu)
+        teacher_outputs = teacher_net(sdf, illu)
+
+        loss = criterion(student_outputs, teacher_outputs, target)
+
+        avg_meters['loss'].update(loss.item(), sdf.size(0))
+
+        # compute gradient and do optimizing step
+
+        loss.backward()
+        # 梯度裁剪，限制梯度的值在某个范围内
+        # torch.nn.utils.clip_grad_value_(network.parameters(),1)
+        # 梯度裁剪，按范数裁剪，限制梯度的L2范数的最大值
+        # torch.nn.utils.clip_grad_norm_(network.parameters(), 1)
+
+        optimizer.step()
+
+        postfix = OrderedDict([('loss', avg_meters['loss'].avg),])
+        pbar.set_postfix(postfix)
+        pbar.update(1)
+        # 释放未使用的内存
+        torch.cuda.empty_cache()
+
+    pbar.close()
+
+    return OrderedDict([('loss', avg_meters['loss'].avg),])
 
 # val里没有loss回传
 def validate(val_loader, network, criterion,use_val):
@@ -99,7 +138,7 @@ def validate(val_loader, network, criterion,use_val):
             sdf = features[:, 0:3, :, :]
             illu = features[:, 3:6, :, :]
 
-            target = target.cuda()
+            target = target[:, 0:3, :, :].cuda()
             sdf = sdf.cuda()
             illu = illu.cuda()
 
@@ -147,28 +186,7 @@ def main():
     with open('{}{}//config.yml'.format(save_path,config['name']), 'w') as f:
         yaml.dump(config, f)
 
-    # -------- load model --------
-    criterion = losses.__dict__["CombinedLoss"]().cuda()
-    cudnn.benchmark = True
-    # 创建模型实例
-    device = torch.device("cuda")
-    # model = torch.load('{}{}//model.pt'.format(save_path, config['testname']), map_location=device)
-    model = models.__dict__["Single_Model"]()
-    # student_net_sdf.load_state_dict(torch.load('models_sdf/1-manix-2spp/model.pth'))
-    model = model.cuda()
-    # params = filter(lambda p: p.requires_grad, model.parameters())
-    # 不设置正则化，weightdecay默认为0，设置betas表示动量
-    optimizer = optim.Adam(model.parameters(), lr=config['lr'], betas=(0.9, 0.999))
 
-
-    # 用初始化混合精度训练工具Apex，能够在不降低性能的情况下，将模型训练的速度提升2-4倍，训练显存消耗减少为之前的一半
-    # 用起来似乎不太正常，loss不下降
-    # model, optimizer = amp.initialize(model, optimizer, opt_level="O2")
-
-    # 加入一个学习率调度器
-    # patience：连续25轮没有改善就降低学习率 cooldown继续检查间隔的轮数，factor下调百分比 minlr最低学习率
-    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=25, cooldown=10, factor=0.5, min_lr=1e-5,
-    #                                                        threshold=1e-5)
 
     # -------- load dataset --------
 
@@ -229,37 +247,110 @@ def main():
         ('val_loss', []),
     ])
 
-    min_loss = 10
 
-    # 多加入一个并行机制，当有多个gpu的时候可以用
-    parallel_model = torch.nn.DataParallel(model)
+    # -------- load model --------
+    if config['distillation'] == 1:
+        # 使用蒸馏的loss
+        criterion = losses.__dict__["RAEloss_kd"]().cuda()
+        cudnn.benchmark = True
+        # 创建模型实例
+        device = torch.device("cuda")
+        # model = torch.load('{}{}//model.pt'.format(save_path, config['testname']), map_location=device)
+        student_model = models.__dict__["Single_Model"]()
+        teacher_model = models.__dict__["Teacher_Model"]()
 
-    # train sdf
-    for epoch in range(config['epochs']):
-        print('Epoch [%d/%d]' % (epoch, config['epochs']))
 
-        # train for one epoch
-        train_log = train(train_loader, parallel_model, criterion, optimizer)
-        val_log = validate(val_loader, parallel_model,  criterion, use_val)
 
-        print('loss %.4f '% (train_log['loss']))
-        log['epoch'].append(epoch)
-        log['lr'].append(config['lr'])
-        log['loss'].append(train_log['loss'])
-        log['val_loss'].append(val_log['loss'])
-        pd.DataFrame(log).to_csv('{}{}\\log.csv'.format(save_path,config['name']), index=False)
-        if val_log['loss'] < min_loss:
-            min_loss = val_log['loss']
-            checkpoint = {
-                'best_loss': min_loss,
-                'weights': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-            }
-            torch.save(model,'{}{}\\model.pt'.format(save_path,config['name']))
-            # torch.save(model.state_dict(), 'models_sdf/%s/model.pth' % config['name'])
 
-            print("=> saved best model")
-        torch.cuda.empty_cache()
+        # student_net_sdf.load_state_dict(torch.load('models_sdf/1-manix-2spp/model.pth'))
+        student_model = student_model.cuda()
+        teacher_model = teacher_model.cuda()
+        # params = filter(lambda p: p.requires_grad, model.parameters())
+        # 不设置正则化，weightdecay默认为0，设置betas表示动量
+        # optimizer应该设置为学生模型的参数 （？？？）
+        optimizer = optim.Adam(student_model.parameters(), lr=config['lr'], betas=(0.9, 0.999))
+
+        # 用初始化混合精度训练工具Apex，能够在不降低性能的情况下，将模型训练的速度提升2-4倍，训练显存消耗减少为之前的一半
+        # 用起来似乎不太正常，loss不下降
+        # model, optimizer = amp.initialize(model, optimizer, opt_level="O2")
+
+        # 加入一个学习率调度器
+        # patience：连续25轮没有改善就降低学习率 cooldown继续检查间隔的轮数，factor下调百分比 minlr最低学习率
+        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=25, cooldown=10, factor=0.5, min_lr=1e-5,
+        #                                                        threshold=1e-5)
+        # 多加入一个并行机制，当有多个gpu的时候可以用
+
+        min_loss = 10
+
+        parallel_student_model = torch.nn.DataParallel(student_model)
+        parallel_teacher_model = torch.nn.DataParallel(teacher_model)
+        # use both teacher model and student model to train
+        for epoch in range(config['epochs']):
+            print('Epoch [%d/%d]' % (epoch, config['epochs']))
+
+            # train for one epoch
+            train_log = train_distillation(train_loader, parallel_student_model,parallel_teacher_model, criterion, optimizer)
+            val_log = validate(val_loader, parallel_student_model,  criterion, use_val)
+
+            print('loss %.4f '% (train_log['loss']))
+            log['epoch'].append(epoch)
+            log['lr'].append(config['lr'])
+            log['loss'].append(train_log['loss'])
+            log['val_loss'].append(val_log['loss'])
+            pd.DataFrame(log).to_csv('{}{}\\log.csv'.format(save_path,config['name']), index=False)
+            if val_log['loss'] < min_loss:
+                min_loss = val_log['loss']
+                checkpoint = {
+                    'best_loss': min_loss,
+                    'weights': parallel_student_model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                }
+                torch.save(parallel_student_model,'{}{}\\model.pt'.format(save_path,config['name']))
+                # torch.save(model.state_dict(), 'models_sdf/%s/model.pth' % config['name'])
+
+                print("=> saved best model")
+            torch.cuda.empty_cache()
+    else:
+        criterion = losses.__dict__["CombinedLoss"]().cuda()
+        cudnn.benchmark = True
+        # 创建模型实例
+        device = torch.device("cuda")
+        # model = torch.load('{}{}//model.pt'.format(save_path, config['testname']), map_location=device)
+        model = models.__dict__["Single_Model"]().cuda()
+        # ----------- load pretrained models -------------
+        # student_net_sdf.load_state_dict(torch.load('models_sdf/1-manix-2spp/model.pth'))
+        # params = filter(lambda p: p.requires_grad, model.parameters())
+        # 不设置正则化，weightdecay默认为0，设置betas表示动量
+        optimizer = optim.Adam(model.parameters(), lr=config['lr'], betas=(0.9, 0.999))
+
+        min_loss = 10
+
+        parallel_model = torch.nn.DataParallel(model)
+        # use both teacher model and student model to train
+        for epoch in range(config['epochs']):
+            print('Epoch [%d/%d]' % (epoch, config['epochs']))
+
+            # train for one epoch
+            train_log = train_student_only(train_loader, parallel_model, criterion, optimizer)
+            val_log = validate(val_loader, parallel_model, criterion, use_val)
+
+            print('loss %.4f ' % (train_log['loss']))
+            log['epoch'].append(epoch)
+            log['lr'].append(config['lr'])
+            log['loss'].append(train_log['loss'])
+            log['val_loss'].append(val_log['loss'])
+            pd.DataFrame(log).to_csv('{}{}\\log.csv'.format(save_path, config['name']), index=False)
+            if val_log['loss'] < min_loss:
+                min_loss = val_log['loss']
+                checkpoint = {
+                    'best_loss': min_loss,
+                    'weights': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                }
+                torch.save(model, '{}{}\\model.pt'.format(save_path, config['name']))
+
+                print("=> saved best model")
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
